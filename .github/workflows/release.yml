@@ -1,205 +1,105 @@
-name: Release Builds
+name: Release
 
 on:
-
   push:
     tags:
       - 'v*'
-
-  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-
-  build:
-
+  build-and-release:
+    name: Build and Release
     runs-on: ubuntu-latest
-
     strategy:
-      fail-fast: false
-
       matrix:
-
         include:
-
-          - goos: linux
+          # Linux
+          - os: linux-amd64
+            goos: linux
             goarch: amd64
-            ext: ""
-            name: linux-amd64
-
-          - goos: linux
+          - os: linux-arm64
+            goos: linux
             goarch: arm64
-            ext: ""
-            name: linux-arm64
-
-          - goos: linux
+          - os: linux-armv7
+            goos: linux
             goarch: arm
             goarm: 7
-            ext: ""
-            name: linux-armv7
-
-          - goos: linux
+          - os: linux-386
+            goos: linux
             goarch: 386
-            ext: ""
-            name: linux-386
-
-          - goos: windows
+          
+          # Windows
+          - os: windows-amd64
+            goos: windows
             goarch: amd64
-            ext: ".exe"
-            name: windows-amd64
-
-          - goos: windows
+          - os: windows-arm64
+            goos: windows
             goarch: arm64
-            ext: ".exe"
-            name: windows-arm64
-
-          - goos: windows
+          - os: windows-386
+            goos: windows
             goarch: 386
-            ext: ".exe"
-            name: windows-386
-
-          - goos: darwin
+          
+          # macOS
+          - os: macos-amd64
+            goos: darwin
             goarch: amd64
-            ext: ""
-            name: macos-amd64
-
-          - goos: darwin
+          - os: macos-arm64
+            goos: darwin
             goarch: arm64
-            ext: ""
-            name: macos-arm64
-
-          - goos: android
+          
+          # Android
+          - os: android-arm64
+            goos: android
             goarch: arm64
-            ext: ""
-            name: android-arm64
-            
+
     steps:
-
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Go
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
-      - name: Prepare
+      - name: Build Binaries
+        shell: bash
         run: |
-          mkdir -p release
-
-      - name: Build Client
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
-          CGO_ENABLED: 0
-
-        run: |
-
-          CLIENT_NAME="flowdriver-client-${{ matrix.name }}${{ matrix.ext }}"
-
-          go build \
-            -trimpath \
-            -ldflags="-s -w" \
-            -o "release/${CLIENT_NAME}" \
-            ./cmd/client
-
-      - name: Build Server
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
-          CGO_ENABLED: 0
-
-        run: |
-
-          SERVER_NAME="flowdriver-server-${{ matrix.name }}${{ matrix.ext }}"
-
-          go build \
-            -trimpath \
-            -ldflags="-s -w" \
-            -o "release/${SERVER_NAME}" \
-            ./cmd/server
-
-      - name: Copy Example Configs
-        run: |
-
-          cp client_config.json.example \
-            release/client_config.json.example || true
-
-          cp server_config.json.example \
-            release/server_config.json.example || true
-
-      - name: Package Release
-        run: |
-
-          cd release
-
-          for file in flowdriver-*; do
-
-            if [[ -f "$file" ]]; then
-
-              ARCHIVE="${file}.tar.gz"
-
-              tar -czf "$ARCHIVE" \
-                "$file" \
-                client_config.json.example \
-                server_config.json.example || true
-            fi
-          done
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.name }}
-          path: release/*.tar.gz
-
-  publish:
-
-    needs: build
-
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
-    steps:
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Prepare Release Files
-        run: |
-
-          mkdir final
-
-          find artifacts -type f -name "*.tar.gz" \
-            -exec cp {} final/ \;
-
-      - name: Generate Tag
-        id: tag
-
-        run: |
-
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          else
-            TAG="manual-$(date +%Y%m%d-%H%M%S)"
+          VERSION=${GITHUB_REF_NAME}
+          
+          CLIENT_FOLDER="flowdriver-client-${VERSION}-${{ matrix.os }}"
+          SERVER_FOLDER="flowdriver-server-${VERSION}-${{ matrix.os }}"
+          
+          mkdir -p $CLIENT_FOLDER
+          mkdir -p $SERVER_FOLDER
+          
+          SUFFIX=""
+          if [ "${{ matrix.goos }}" == "windows" ]; then
+            SUFFIX=".exe"
           fi
+          
+          # Build Client
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }} go build -o $CLIENT_FOLDER/client$SUFFIX ./cmd/client
+          
+          # Build Server
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }} go build -o $SERVER_FOLDER/server$SUFFIX ./cmd/server
+          
+          # Copy and rename config files
+          cp client_config.json.example $CLIENT_FOLDER/client_config.json
+          cp server_config.json.example $SERVER_FOLDER/server_config.json
+          
+          # Copy README
+          cp README.md $CLIENT_FOLDER/
+          cp README.md $SERVER_FOLDER/
+          
+          # Zip the folders
+          zip -r "${CLIENT_FOLDER}.zip" $CLIENT_FOLDER
+          zip -r "${SERVER_FOLDER}.zip" $SERVER_FOLDER
 
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-
+      - name: Release
+        uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-
-          generate_release_notes: true
-
-          files: |
-            final/*.tar.gz
+          files: flowdriver-*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
